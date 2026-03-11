@@ -1,5 +1,6 @@
 from pathlib import Path
 import pandas as pd
+import csv
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -228,14 +229,54 @@ def main():
     # -------------------------
     # 7. Write clean files
     # -------------------------
-    print("Writing clean LOAD CSV files...")
-    authors.to_csv(CLEAN_DIR / "authors_clean.csv", index=False)
-    papers.to_csv(CLEAN_DIR / "papers_clean.csv", index=False)
-    wrote.to_csv(CLEAN_DIR / "wrote_clean.csv", index=False)
-    events.to_csv(CLEAN_DIR / "events_clean.csv", index=False)
-    journals.to_csv(CLEAN_DIR / "journals_clean.csv", index=False)
-    published_in_journal.to_csv(CLEAN_DIR / "published_in_journal.csv", index=False)
-    published_in_event.to_csv(CLEAN_DIR / "published_in_event.csv", index=False)
+    authors.to_csv(
+        CLEAN_DIR / "authors_clean.csv",
+        index=False,
+        quoting=csv.QUOTE_ALL,
+        escapechar="\\"
+    )
+
+    papers.to_csv(
+        CLEAN_DIR / "papers_clean.csv",
+        index=False,
+        quoting=csv.QUOTE_ALL,
+        escapechar="\\"
+    )
+
+    wrote.to_csv(
+        CLEAN_DIR / "wrote_clean.csv",
+        index=False,
+        quoting=csv.QUOTE_ALL,
+        escapechar="\\"
+    )
+
+    events.to_csv(
+        CLEAN_DIR / "events_clean.csv",
+        index=False,
+        quoting=csv.QUOTE_ALL,
+        escapechar="\\"
+    )
+
+    journals.to_csv(
+        CLEAN_DIR / "journals_clean.csv",
+        index=False,
+        quoting=csv.QUOTE_ALL,
+        escapechar="\\"
+    )
+
+    published_in_journal.to_csv(
+        CLEAN_DIR / "published_in_journal.csv",
+        index=False,
+        quoting=csv.QUOTE_ALL,
+        escapechar="\\"
+    )
+
+    published_in_event.to_csv(
+        CLEAN_DIR / "published_in_event.csv",
+        index=False,
+        quoting=csv.QUOTE_ALL,
+        escapechar="\\"
+    )
 
     print("Done.")
     print("Clean files written to neo4j/load_csv/")
