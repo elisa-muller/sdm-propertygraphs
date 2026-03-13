@@ -137,13 +137,14 @@ def process_article_chunk(chunk: pd.DataFrame, remaining: int):
             "dblpUrl": safe_str(row.get("url")),
         })
 
-        for author_name in split_multi_value(row.get("author")):
+        for idx, author_name in enumerate(split_multi_value(row.get("author")), start=1):
             authors.append({
                 "authorName:ID(Author)": author_name,
             })
             wrote.append({
                 ":START_ID(Author)": author_name,
                 ":END_ID(Paper)": paper_id,
+                "authorOrder:int": idx,
             })
 
         journals.append({
@@ -220,13 +221,14 @@ def process_inproc_chunk(chunk: pd.DataFrame, remaining: int):
             "dblpUrl": safe_str(row.get("url")),
         })
 
-        for author_name in split_multi_value(row.get("author")):
+        for idx, author_name in enumerate(split_multi_value(row.get("author")), start=1):
             authors.append({
                 "authorName:ID(Author)": author_name,
             })
             wrote.append({
                 ":START_ID(Author)": author_name,
                 ":END_ID(Paper)": paper_id,
+                "authorOrder:int": idx,
             })
 
         editions.append({
