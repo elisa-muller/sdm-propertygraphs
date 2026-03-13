@@ -15,22 +15,15 @@ venv/
 .idea/
 .vscode/
 
-# Data
-*.csv
-*.tsv
-*.xml
-*.json
-data/
+# Generated data (SDM project)
+neo4j/import/*.csv
+neo4j/load_csv/*.csv
 data/raw/
-neo4j/import/
-neo4j/load_csv/
+data/processed/
 
-# DBLP
+# DBLP dump
 dblp.dtd
 dblp.xml
-
-# Scripts
-*.sh
 
 # Logs/temp
 *.log
