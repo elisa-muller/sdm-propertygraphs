@@ -58,6 +58,20 @@ def write_clean_csv(df: pd.DataFrame, path: Path):
     )
 
 
+def collapse_by_id_keep_non_empty(df: pd.DataFrame, id_col: str) -> pd.DataFrame:
+    df = df.fillna("").copy()
+
+    def pick(series):
+        for v in series:
+            if str(v).strip() != "":
+                return v
+        return ""
+
+    agg_map = {col: pick for col in df.columns if col != id_col}
+    collapsed = df.groupby(id_col, as_index=False).agg(agg_map)
+    return collapsed.reset_index(drop=True)
+
+
 def main():
     print("Reading intermediate CSV files...")
 
@@ -184,6 +198,7 @@ def main():
     editions["year"] = editions["year"].map(normalize_int_like)
 
     editions = editions[editions["editionId"] != ""]
+    editions = collapse_by_id_keep_non_empty(editions, "editionId")
     editions = dedup(editions)
 
     valid_edition_ids = set(editions["editionId"].tolist())
@@ -235,12 +250,10 @@ def main():
     papers = papers[papers["paperId"].isin(papers_with_authors)].copy()
     papers = dedup(papers)
 
-    # Refresh valid papers after removing authorless papers
     valid_paper_ids = set(papers["paperId"].tolist())
     wrote = wrote[wrote["paperId"].isin(valid_paper_ids)].copy()
     wrote = dedup(wrote)
 
-    # Keep only authors really used in wrote
     used_authors = set(wrote["authorName"].tolist())
     authors = authors[authors["authorName"].isin(used_authors)].copy()
     authors = dedup(authors)
