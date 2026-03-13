@@ -1,3 +1,0 @@
-paperId,title,year,abstract,citationCount,referenceCount,venue
-paper1,Efficient Data Management in Distributed Systems,2021,This paper studies scalable data management techniques.,25,10,VLDB
-paper2,Indexing Methods for Large Databases,2019,We present new indexing structures.,40,15,SIGMOD
