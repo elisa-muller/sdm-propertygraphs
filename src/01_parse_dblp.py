@@ -1,298 +1,228 @@
 from pathlib import Path
 import pandas as pd
-import csv
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+RAW_DIR = PROJECT_ROOT / "data" / "processed"
 IMPORT_DIR = PROJECT_ROOT / "neo4j" / "import"
-CLEAN_DIR = PROJECT_ROOT / "neo4j" / "load_csv"
 
-CLEAN_DIR.mkdir(parents=True, exist_ok=True)
+ARTICLE_FILE = RAW_DIR / "output_article"
+INPROC_FILE = RAW_DIR / "output_inproceedings"
+
+IMPORT_DIR.mkdir(parents=True, exist_ok=True)
+
+CHUNKSIZE = 50000
 
 
-def read_csv_safe(path: Path) -> pd.DataFrame:
-    return pd.read_csv(path, dtype=str, keep_default_na=False)
-
-
-def clean_str(x: str) -> str:
-    if x is None:
+def safe_str(value) -> str:
+    if pd.isna(value):
         return ""
-    return str(x).strip()
+    return str(value).strip()
 
 
-def normalize_year(x: str):
-    x = clean_str(x)
-    if not x:
-        return ""
-    try:
-        return str(int(float(x)))
-    except ValueError:
-        return ""
+def split_multi_value(cell: str, sep: str = "|") -> list[str]:
+    text = safe_str(cell)
+    if not text:
+        return []
+    return [x.strip() for x in text.split(sep) if x.strip()]
 
 
-def is_valid_paper_id(paper_id: str) -> bool:
-    paper_id = clean_str(paper_id)
-    if not paper_id:
-        return False
-    if paper_id.startswith("dblpnote/"):
-        return False
-    return True
+def read_dblp_chunks(path: Path):
+    return pd.read_csv(
+        path,
+        sep=";",
+        dtype=str,
+        encoding="utf-8",
+        engine="python",
+        on_bad_lines="skip",
+        chunksize=CHUNKSIZE,
+    )
 
 
-def dedup(df: pd.DataFrame) -> pd.DataFrame:
-    return df.drop_duplicates().reset_index(drop=True)
+def write_csv(df: pd.DataFrame, path: Path, first_write: bool):
+    mode = "w" if first_write else "a"
+    header = first_write
+    df.to_csv(path, mode=mode, header=header, index=False)
+
+
+def process_article_chunk(chunk: pd.DataFrame):
+    papers = []
+    authors = []
+    wrote = []
+    journals = []
+    published_in = []
+
+    for _, row in chunk.iterrows():
+        paper_id = safe_str(row.get("key"))
+        title = safe_str(row.get("title"))
+        year = safe_str(row.get("year"))
+        pages = safe_str(row.get("pages"))
+        doi = safe_str(row.get("ee"))
+        journal = safe_str(row.get("journal"))
+
+        if not paper_id or not title:
+            continue
+
+        papers.append({
+            "paperId:ID(Paper)": paper_id,
+            "title": title,
+            "year:int": int(year) if year.isdigit() else None,
+            "pages": pages,
+            "doi": doi,
+            "paperType": "article",
+        })
+
+        for author_name in split_multi_value(row.get("author")):
+            authors.append({"authorName:ID(Author)": author_name})
+            wrote.append({
+                ":START_ID(Author)": author_name,
+                ":END_ID(Paper)": paper_id,
+            })
+
+        if journal:
+            journals.append({"journalName:ID(Journal)": journal})
+            published_in.append({
+                ":START_ID(Paper)": paper_id,
+                ":END_ID(Journal)": journal,
+                "venueType": "journal",
+            })
+
+    return (
+        pd.DataFrame(papers).drop_duplicates(),
+        pd.DataFrame(authors).drop_duplicates(),
+        pd.DataFrame(wrote).drop_duplicates(),
+        pd.DataFrame(journals).drop_duplicates(),
+        pd.DataFrame(published_in).drop_duplicates(),
+    )
+
+
+def process_inproc_chunk(chunk: pd.DataFrame):
+    papers = []
+    authors = []
+    wrote = []
+    events = []
+    published_in = []
+
+    for _, row in chunk.iterrows():
+        paper_id = safe_str(row.get("key"))
+        title = safe_str(row.get("title"))
+        year = safe_str(row.get("year"))
+        pages = safe_str(row.get("pages"))
+        doi = safe_str(row.get("ee"))
+        event = safe_str(row.get("booktitle"))
+
+        if not paper_id or not title:
+            continue
+
+        papers.append({
+            "paperId:ID(Paper)": paper_id,
+            "title": title,
+            "year:int": int(year) if year.isdigit() else None,
+            "pages": pages,
+            "doi": doi,
+            "paperType": "inproceedings",
+        })
+
+        for author_name in split_multi_value(row.get("author")):
+            authors.append({"authorName:ID(Author)": author_name})
+            wrote.append({
+                ":START_ID(Author)": author_name,
+                ":END_ID(Paper)": paper_id,
+            })
+
+        if event:
+            events.append({"eventName:ID(Event)": event})
+            published_in.append({
+                ":START_ID(Paper)": paper_id,
+                ":END_ID(Event)": event,
+                "venueType": "conference_or_workshop",
+            })
+
+    return (
+        pd.DataFrame(papers).drop_duplicates(),
+        pd.DataFrame(authors).drop_duplicates(),
+        pd.DataFrame(wrote).drop_duplicates(),
+        pd.DataFrame(events).drop_duplicates(),
+        pd.DataFrame(published_in).drop_duplicates(),
+    )
 
 
 def main():
-    print("Reading intermediate CSV files...")
-
-    authors = read_csv_safe(IMPORT_DIR / "authors.csv")
-    papers = read_csv_safe(IMPORT_DIR / "papers.csv")
-    wrote = read_csv_safe(IMPORT_DIR / "wrote.csv")
-    events = read_csv_safe(IMPORT_DIR / "events.csv")
-    journals = read_csv_safe(IMPORT_DIR / "journals.csv")
-    published_in = read_csv_safe(IMPORT_DIR / "published_in.csv")
-
-    print("Original sizes:")
-    print(f"  authors: {len(authors)}")
-    print(f"  papers: {len(papers)}")
-    print(f"  wrote: {len(wrote)}")
-    print(f"  events: {len(events)}")
-    print(f"  journals: {len(journals)}")
-    print(f"  published_in: {len(published_in)}")
-
-    # -------------------------
-    # 1. Clean papers
-    # -------------------------
-    print("Cleaning papers...")
-    papers = papers.rename(
-        columns={
-            "paperId:ID(Paper)": "paperId",
-            "year:int": "year",
-        }
-    )
-
-    required_paper_cols = ["paperId", "title", "year", "pages", "doi", "paperType"]
-    for col in required_paper_cols:
-        if col not in papers.columns:
-            papers[col] = ""
-
-    papers["paperId"] = papers["paperId"].map(clean_str)
-    papers["title"] = papers["title"].map(clean_str)
-    papers["title"] = papers["title"].str.replace("\n", " ", regex=False)
-    papers["title"] = papers["title"].str.replace("\r", " ", regex=False)
-    papers["title"] = papers["title"].str.replace("\u2028", " ", regex=False)
-    papers["title"] = papers["title"].str.replace("\u2029", " ", regex=False)
-    papers["title"] = papers["title"].str.replace("\t", " ", regex=False)
-    papers["title"] = papers["title"].str.replace('"', "'", regex=False)
-    papers["year"] = papers["year"].map(normalize_year)
-    papers["pages"] = papers["pages"].map(clean_str)
-    papers["doi"] = papers["doi"].map(clean_str)
-    papers["paperType"] = papers["paperType"].map(clean_str)
-
-    papers = papers[papers["paperId"].map(is_valid_paper_id)]
-    papers = papers[papers["title"] != ""]
-    papers = dedup(papers)
-
-    valid_paper_ids = set(papers["paperId"].tolist())
-
-    # -------------------------
-    # 2. Clean authors
-    # -------------------------
-    print("Cleaning authors...")
-    authors = authors.rename(columns={"authorName:ID(Author)": "authorName"})
-    if "authorName" not in authors.columns:
-        authors["authorName"] = ""
-
-    authors = authors[["authorName"]].copy()
-    authors["authorName"] = authors["authorName"].map(clean_str)
-    authors = authors[authors["authorName"] != ""]
-    authors = dedup(authors)
-
-    valid_author_names = set(authors["authorName"].tolist())
-
-    # -------------------------
-    # 3. Clean wrote
-    # -------------------------
-    print("Cleaning wrote relationships...")
-    wrote = wrote.rename(
-        columns={
-            ":START_ID(Author)": "authorName",
-            ":END_ID(Paper)": "paperId",
-        }
-    )
-
-    for col in ["authorName", "paperId"]:
-        if col not in wrote.columns:
-            wrote[col] = ""
-
-    wrote = wrote[["authorName", "paperId"]].copy()
-    wrote["authorName"] = wrote["authorName"].map(clean_str)
-    wrote["paperId"] = wrote["paperId"].map(clean_str)
-
-    wrote = wrote[
-        (wrote["authorName"] != "")
-        & (wrote["paperId"] != "")
-        & (wrote["authorName"].isin(valid_author_names))
-        & (wrote["paperId"].isin(valid_paper_ids))
-    ]
-    wrote = dedup(wrote)
-
-    used_authors = set(wrote["authorName"].tolist())
-    authors = authors[authors["authorName"].isin(used_authors)].copy()
-    authors = dedup(authors)
-
-    # -------------------------
-    # 4. Clean events
-    # -------------------------
-    print("Cleaning events...")
-    events = events.rename(columns={"eventName:ID(Event)": "eventName"})
-    if "eventName" not in events.columns:
-        events["eventName"] = ""
-
-    events = events[["eventName"]].copy()
-    events["eventName"] = events["eventName"].map(clean_str)
-    events = events[events["eventName"] != ""]
-    events = dedup(events)
-
-    valid_event_names = set(events["eventName"].tolist())
-
-    # -------------------------
-    # 5. Clean journals
-    # -------------------------
-    print("Cleaning journals...")
-    journals = journals.rename(columns={"journalName:ID(Journal)": "journalName"})
-    if "journalName" not in journals.columns:
-        journals["journalName"] = ""
-
-    journals = journals[["journalName"]].copy()
-    journals["journalName"] = journals["journalName"].map(clean_str)
-    journals = journals[journals["journalName"] != ""]
-    journals = dedup(journals)
-
-    valid_journal_names = set(journals["journalName"].tolist())
-
-    # -------------------------
-    # 6. Split published_in
-    # -------------------------
-    print("Cleaning and splitting published_in relationships...")
-    published_in = published_in.rename(
-        columns={
-            ":START_ID(Paper)": "paperId",
-            ":END_ID(Journal)": "venueName",
-            "venueType": "venueType",
-        }
-    )
-
-    for col in ["paperId", "venueName", "venueType"]:
-        if col not in published_in.columns:
-            published_in[col] = ""
-
-    published_in = published_in[["paperId", "venueName", "venueType"]].copy()
-    published_in["paperId"] = published_in["paperId"].map(clean_str)
-    published_in["venueName"] = published_in["venueName"].map(clean_str)
-    published_in["venueType"] = published_in["venueType"].map(clean_str)
-
-    published_in = published_in[
-        (published_in["paperId"] != "")
-        & (published_in["venueName"] != "")
-        & (published_in["paperId"].isin(valid_paper_ids))
-    ]
-    published_in = dedup(published_in)
-
-    published_in_journal = published_in[published_in["venueType"] == "journal"].copy()
-    published_in_event = published_in[published_in["venueType"] == "conference_or_workshop"].copy()
-
-    published_in_journal = published_in_journal.rename(columns={"venueName": "journalName"})
-    published_in_event = published_in_event.rename(columns={"venueName": "eventName"})
-
-    published_in_journal = published_in_journal[["paperId", "journalName"]]
-    published_in_event = published_in_event[["paperId", "eventName"]]
-
-    published_in_journal = published_in_journal[
-        published_in_journal["journalName"].isin(valid_journal_names)
-    ]
-    published_in_event = published_in_event[
-        published_in_event["eventName"].isin(valid_event_names)
+    output_files = [
+        IMPORT_DIR / "papers.csv",
+        IMPORT_DIR / "authors.csv",
+        IMPORT_DIR / "wrote.csv",
+        IMPORT_DIR / "journals.csv",
+        IMPORT_DIR / "events.csv",
+        IMPORT_DIR / "published_in.csv",
     ]
 
-    published_in_journal = dedup(published_in_journal)
-    published_in_event = dedup(published_in_event)
+    for f in output_files:
+        if f.exists():
+            f.unlink()
 
-    used_journals = set(published_in_journal["journalName"].tolist())
-    used_events = set(published_in_event["eventName"].tolist())
+    print("Processing article chunks...")
+    first_papers = first_authors = first_wrote = True
+    first_journals = True
+    first_events = True
+    first_published_in = True
 
-    journals = journals[journals["journalName"].isin(used_journals)].copy()
-    events = events[events["eventName"].isin(used_events)].copy()
+    article_chunks = 0
+    for chunk in read_dblp_chunks(ARTICLE_FILE):
+        article_chunks += 1
+        print(f"  article chunk {article_chunks}")
 
-    journals = dedup(journals)
-    events = dedup(events)
+        df_papers, df_authors, df_wrote, df_journals, df_pubin = process_article_chunk(chunk)
 
-    # -------------------------
-    # 7. Write clean files
-    # -------------------------
-    print("Writing clean LOAD CSV files...")
+        if not df_papers.empty:
+            write_csv(df_papers, IMPORT_DIR / "papers.csv", first_papers)
+            first_papers = False
 
-    authors.to_csv(
-        CLEAN_DIR / "authors_clean.csv",
-        index=False,
-        quoting=csv.QUOTE_ALL,
-        escapechar="\\"
-    )
+        if not df_authors.empty:
+            write_csv(df_authors, IMPORT_DIR / "authors.csv", first_authors)
+            first_authors = False
 
-    papers.to_csv(
-        CLEAN_DIR / "papers_clean.tsv",
-        index=False,
-        sep="\t",
-        quoting=csv.QUOTE_NONE,
-        escapechar="\\"
-    )
+        if not df_wrote.empty:
+            write_csv(df_wrote, IMPORT_DIR / "wrote.csv", first_wrote)
+            first_wrote = False
 
-    wrote.to_csv(
-        CLEAN_DIR / "wrote_clean.csv",
-        index=False,
-        quoting=csv.QUOTE_ALL,
-        escapechar="\\"
-    )
+        if not df_journals.empty:
+            write_csv(df_journals, IMPORT_DIR / "journals.csv", first_journals)
+            first_journals = False
 
-    events.to_csv(
-        CLEAN_DIR / "events_clean.csv",
-        index=False,
-        quoting=csv.QUOTE_ALL,
-        escapechar="\\"
-    )
+        if not df_pubin.empty:
+            write_csv(df_pubin, IMPORT_DIR / "published_in.csv", first_published_in)
+            first_published_in = False
 
-    journals.to_csv(
-        CLEAN_DIR / "journals_clean.csv",
-        index=False,
-        quoting=csv.QUOTE_ALL,
-        escapechar="\\"
-    )
+    print("Processing inproceedings chunks...")
+    inproc_chunks = 0
+    for chunk in read_dblp_chunks(INPROC_FILE):
+        inproc_chunks += 1
+        print(f"  inproceedings chunk {inproc_chunks}")
 
-    published_in_journal.to_csv(
-        CLEAN_DIR / "published_in_journal.csv",
-        index=False,
-        quoting=csv.QUOTE_ALL,
-        escapechar="\\"
-    )
+        df_papers, df_authors, df_wrote, df_events, df_pubin = process_inproc_chunk(chunk)
 
-    published_in_event.to_csv(
-        CLEAN_DIR / "published_in_event.csv",
-        index=False,
-        quoting=csv.QUOTE_ALL,
-        escapechar="\\"
-    )
+        if not df_papers.empty:
+            write_csv(df_papers, IMPORT_DIR / "papers.csv", first_papers)
+            first_papers = False
+
+        if not df_authors.empty:
+            write_csv(df_authors, IMPORT_DIR / "authors.csv", first_authors)
+            first_authors = False
+
+        if not df_wrote.empty:
+            write_csv(df_wrote, IMPORT_DIR / "wrote.csv", first_wrote)
+            first_wrote = False
+
+        if not df_events.empty:
+            write_csv(df_events, IMPORT_DIR / "events.csv", first_events)
+            first_events = False
+
+        if not df_pubin.empty:
+            write_csv(df_pubin, IMPORT_DIR / "published_in.csv", first_published_in)
+            first_published_in = False
 
     print("Done.")
-    print("Clean files written to neo4j/load_csv/")
-    print("Final sizes:")
-    print(f"  authors_clean: {len(authors)}")
-    print(f"  papers_clean: {len(papers)}")
-    print(f"  wrote_clean: {len(wrote)}")
-    print(f"  events_clean: {len(events)}")
-    print(f"  journals_clean: {len(journals)}")
-    print(f"  published_in_journal: {len(published_in_journal)}")
-    print(f"  published_in_event: {len(published_in_event)}")
+    print("Files written to neo4j/import/")
 
 
 if __name__ == "__main__":
