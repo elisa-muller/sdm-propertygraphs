@@ -71,10 +71,10 @@ def main():
         paper_authors = paper_to_authors.get(paper, set())
         candidate_reviewers = [a for a in author_ids if a not in paper_authors]
 
-        if len(candidate_reviewers) < 2:
+        if len(candidate_reviewers) < 3:
             continue
 
-        reviewers = random.sample(candidate_reviewers, k=2)
+        reviewers = random.sample(candidate_reviewers, k=3)
 
         for reviewer in reviewers:
             pair = (reviewer, paper)
