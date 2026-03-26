@@ -17,6 +17,15 @@ CHUNKSIZE = 50000
 MAX_ARTICLES = 12000
 MAX_INPROCS = 18000
 
+# Keep a mixed graph:
+# - enough DB-oriented papers to make some venues pass Part C
+# - enough general papers to preserve realism
+DB_ARTICLE_TARGET = 4500
+GENERAL_ARTICLE_TARGET = MAX_ARTICLES - DB_ARTICLE_TARGET
+
+DB_INPROC_TARGET = 7000
+GENERAL_INPROC_TARGET = MAX_INPROCS - DB_INPROC_TARGET
+
 EDITION_COLUMNS = [
     "editionId:ID(Edition)",
     "booktitle",
@@ -26,6 +35,69 @@ EDITION_COLUMNS = [
     "publisher",
     "isbn",
     "ee",
+]
+
+# -----------------------------
+# DB-focused signals
+# -----------------------------
+DB_TITLE_HINTS = [
+    "database",
+    "databases",
+    "data management",
+    "query",
+    "queries",
+    "querying",
+    "sql",
+    "transaction",
+    "transactions",
+    "index",
+    "indexing",
+    "join",
+    "joins",
+    "schema",
+    "schemas",
+    "data model",
+    "data modeling",
+    "data storage",
+    "data processing",
+    "information system",
+    "information systems",
+    "big data",
+    "warehouse",
+    "warehousing",
+    "retrieval",
+]
+
+DB_VENUE_HINTS = [
+    "sigmod",
+    "vldb",
+    "pvldb",
+    "icde",
+    "edbt",
+    "pods",
+    "cidr",
+    "ssdbm",
+    "dasfaa",
+    "webdb",
+    "information systems",
+    "world wide web",
+    "data engineering",
+    "database",
+]
+
+# Stronger venue hints for proceedings / events.
+# These are the venues we want to be more coherent so some can pass >= 90%.
+STRONG_DB_EVENT_HINTS = [
+    "sigmod",
+    "vldb",
+    "pvldb",
+    "icde",
+    "edbt",
+    "pods",
+    "cidr",
+    "ssdbm",
+    "dasfaa",
+    "webdb",
 ]
 
 
@@ -98,7 +170,51 @@ def make_event_id(series: str, title: str, booktitle: str) -> str:
     return title
 
 
-def process_article_chunk(chunk: pd.DataFrame, remaining: int):
+def contains_any(text: str, patterns: list[str]) -> bool:
+    text = safe_str(text).lower()
+    return any(p in text for p in patterns)
+
+
+def classify_article(row) -> str | None:
+    paper_id = safe_str(row.get("key"))
+    title = safe_str(row.get("title"))
+    journal = safe_str(row.get("journal"))
+
+    if not paper_id or not title or not journal:
+        return None
+
+    title_l = title.lower()
+    journal_l = journal.lower()
+
+    is_db = contains_any(title_l, DB_TITLE_HINTS) or contains_any(journal_l, DB_VENUE_HINTS)
+    return "db" if is_db else "general"
+
+
+def classify_inproc(row) -> str | None:
+    paper_id = safe_str(row.get("key"))
+    title = safe_str(row.get("title"))
+    booktitle = safe_str(row.get("booktitle"))
+    crossref = safe_str(row.get("crossref"))
+
+    if not paper_id or not title:
+        return None
+
+    title_l = title.lower()
+    venue_text = f"{booktitle} {crossref}".lower()
+
+    # Strong DB if the venue itself looks DB-specific.
+    strong_db = contains_any(venue_text, STRONG_DB_EVENT_HINTS)
+
+    # Otherwise DB if title/venue carries DB signals.
+    normal_db = contains_any(title_l, DB_TITLE_HINTS) or contains_any(venue_text, DB_VENUE_HINTS)
+
+    if strong_db or normal_db:
+        return "db"
+
+    return "general"
+
+
+def process_article_chunk(chunk: pd.DataFrame, remaining_db: int, remaining_general: int):
     papers = []
     authors = []
     wrote = []
@@ -107,11 +223,18 @@ def process_article_chunk(chunk: pd.DataFrame, remaining: int):
     published_in_volume = []
     belongs_to = []
 
-    kept = 0
+    kept_db = 0
+    kept_general = 0
 
     for _, row in chunk.iterrows():
-        if kept >= remaining:
-            break
+        category = classify_article(row)
+        if category is None:
+            continue
+
+        if category == "db" and kept_db >= remaining_db:
+            continue
+        if category == "general" and kept_general >= remaining_general:
+            continue
 
         paper_id = safe_str(row.get("key"))
         title = safe_str(row.get("title"))
@@ -121,9 +244,6 @@ def process_article_chunk(chunk: pd.DataFrame, remaining: int):
         journal = safe_str(row.get("journal"))
         volume = safe_str(row.get("volume"))
         number = safe_str(row.get("number"))
-
-        if not paper_id or not title or not journal:
-            continue
 
         volume_id = make_volume_id(journal, volume, year, number)
 
@@ -169,7 +289,13 @@ def process_article_chunk(chunk: pd.DataFrame, remaining: int):
             ":END_ID(Journal)": journal,
         })
 
-        kept += 1
+        if category == "db":
+            kept_db += 1
+        else:
+            kept_general += 1
+
+        if kept_db >= remaining_db and kept_general >= remaining_general:
+            break
 
     return (
         pd.DataFrame(papers).drop_duplicates(),
@@ -179,22 +305,30 @@ def process_article_chunk(chunk: pd.DataFrame, remaining: int):
         pd.DataFrame(volumes).drop_duplicates(),
         pd.DataFrame(published_in_volume).drop_duplicates(),
         pd.DataFrame(belongs_to).drop_duplicates(),
-        kept,
+        kept_db,
+        kept_general,
     )
 
 
-def process_inproc_chunk(chunk: pd.DataFrame, remaining: int):
+def process_inproc_chunk(chunk: pd.DataFrame, remaining_db: int, remaining_general: int):
     papers = []
     authors = []
     wrote = []
     editions = []
     published_in_edition = []
 
-    kept = 0
+    kept_db = 0
+    kept_general = 0
 
     for _, row in chunk.iterrows():
-        if kept >= remaining:
-            break
+        category = classify_inproc(row)
+        if category is None:
+            continue
+
+        if category == "db" and kept_db >= remaining_db:
+            continue
+        if category == "general" and kept_general >= remaining_general:
+            continue
 
         paper_id = safe_str(row.get("key"))
         title = safe_str(row.get("title"))
@@ -203,9 +337,6 @@ def process_inproc_chunk(chunk: pd.DataFrame, remaining: int):
         doi = safe_str(row.get("ee"))
         booktitle = safe_str(row.get("booktitle"))
         crossref = safe_str(row.get("crossref"))
-
-        if not paper_id or not title:
-            continue
 
         edition_id = crossref if crossref else booktitle
         if not edition_id:
@@ -248,7 +379,13 @@ def process_inproc_chunk(chunk: pd.DataFrame, remaining: int):
             "pages": pages,
         })
 
-        kept += 1
+        if category == "db":
+            kept_db += 1
+        else:
+            kept_general += 1
+
+        if kept_db >= remaining_db and kept_general >= remaining_general:
+            break
 
     df_editions = pd.DataFrame(editions).drop_duplicates()
     if not df_editions.empty:
@@ -260,7 +397,8 @@ def process_inproc_chunk(chunk: pd.DataFrame, remaining: int):
         pd.DataFrame(wrote).drop_duplicates(),
         df_editions,
         pd.DataFrame(published_in_edition).drop_duplicates(),
-        kept,
+        kept_db,
+        kept_general,
     )
 
 
@@ -284,6 +422,11 @@ def process_proceedings_chunk(chunk: pd.DataFrame, selected_edition_ids: set[str
         if not event_id:
             continue
 
+        events.append({
+            "eventName:ID(Event)": event_id,
+            "type": "conference_or_workshop",
+        })
+
         editions.append({
             "editionId:ID(Edition)": edition_id,
             "booktitle": booktitle,
@@ -293,11 +436,6 @@ def process_proceedings_chunk(chunk: pd.DataFrame, selected_edition_ids: set[str
             "publisher": safe_str(row.get("publisher")),
             "isbn": safe_str(row.get("isbn")),
             "ee": safe_str(row.get("ee")),
-        })
-
-        events.append({
-            "eventName:ID(Event)": event_id,
-            "type": "conference_or_workshop",
         })
 
         is_edition_of.append({
@@ -348,16 +486,22 @@ def main():
     first_belongs_to = True
     first_is_edition_of = True
 
-    article_count = 0
+    article_db_count = 0
+    article_general_count = 0
     article_chunks = 0
 
     for chunk in read_dblp_chunks(ARTICLE_FILE):
-        if article_count >= MAX_ARTICLES:
+        if article_db_count >= DB_ARTICLE_TARGET and article_general_count >= GENERAL_ARTICLE_TARGET:
             break
 
         article_chunks += 1
-        remaining = MAX_ARTICLES - article_count
-        print(f"  article chunk {article_chunks} (remaining target: {remaining})")
+        remaining_db = DB_ARTICLE_TARGET - article_db_count
+        remaining_general = GENERAL_ARTICLE_TARGET - article_general_count
+
+        print(
+            f"  article chunk {article_chunks} "
+            f"(remaining DB: {remaining_db}, remaining general: {remaining_general})"
+        )
 
         (
             df_papers,
@@ -367,8 +511,9 @@ def main():
             df_volumes,
             df_pubin_volume,
             df_belongs_to,
-            kept,
-        ) = process_article_chunk(chunk, remaining)
+            kept_db,
+            kept_general,
+        ) = process_article_chunk(chunk, max(0, remaining_db), max(0, remaining_general))
 
         if not df_papers.empty:
             write_csv(df_papers, IMPORT_DIR / "papers.csv", first_papers)
@@ -402,22 +547,31 @@ def main():
             write_csv(df_belongs_to, IMPORT_DIR / "belongs_to.csv", first_belongs_to)
             first_belongs_to = False
 
-        article_count += kept
+        article_db_count += kept_db
+        article_general_count += kept_general
 
-    print(f"Selected journal articles: {article_count}")
+    print(f"Selected journal articles (DB): {article_db_count}")
+    print(f"Selected journal articles (general): {article_general_count}")
+    print(f"Selected journal articles (total): {article_db_count + article_general_count}")
 
     print("Processing inproceedings chunks...")
-    inproc_count = 0
+    inproc_db_count = 0
+    inproc_general_count = 0
     inproc_chunks = 0
     selected_edition_ids = set()
 
     for chunk in read_dblp_chunks(INPROC_FILE):
-        if inproc_count >= MAX_INPROCS:
+        if inproc_db_count >= DB_INPROC_TARGET and inproc_general_count >= GENERAL_INPROC_TARGET:
             break
 
         inproc_chunks += 1
-        remaining = MAX_INPROCS - inproc_count
-        print(f"  inproceedings chunk {inproc_chunks} (remaining target: {remaining})")
+        remaining_db = DB_INPROC_TARGET - inproc_db_count
+        remaining_general = GENERAL_INPROC_TARGET - inproc_general_count
+
+        print(
+            f"  inproceedings chunk {inproc_chunks} "
+            f"(remaining DB: {remaining_db}, remaining general: {remaining_general})"
+        )
 
         (
             df_papers,
@@ -425,8 +579,9 @@ def main():
             df_wrote,
             df_editions,
             df_pubin_edition,
-            kept,
-        ) = process_inproc_chunk(chunk, remaining)
+            kept_db,
+            kept_general,
+        ) = process_inproc_chunk(chunk, max(0, remaining_db), max(0, remaining_general))
 
         if not df_papers.empty:
             write_csv(df_papers, IMPORT_DIR / "papers.csv", first_papers)
@@ -455,9 +610,12 @@ def main():
             )
             first_pubin_edition = False
 
-        inproc_count += kept
+        inproc_db_count += kept_db
+        inproc_general_count += kept_general
 
-    print(f"Selected inproceedings: {inproc_count}")
+    print(f"Selected inproceedings (DB): {inproc_db_count}")
+    print(f"Selected inproceedings (general): {inproc_general_count}")
+    print(f"Selected inproceedings (total): {inproc_db_count + inproc_general_count}")
     print(f"Selected edition IDs from inproceedings: {len(selected_edition_ids)}")
 
     print("Processing proceedings chunks...")

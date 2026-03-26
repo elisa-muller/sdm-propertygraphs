@@ -24,12 +24,26 @@ def safe_int(x):
         return None
 
 
+def normalize_text(x):
+    return str(x).strip().lower() if x is not None else ""
+
+
 def main():
     print("Loading clean data...")
 
     papers = read_csv(LOAD_DIR / "papers_clean.csv")
     authors = read_csv(LOAD_DIR / "authors_clean.csv")
     wrote = read_csv(LOAD_DIR / "wrote_clean.csv")
+
+    # Needed for venue-aware keyword generation
+    published_in_edition = read_csv(LOAD_DIR / "published_in_edition_clean.csv")
+    published_in_volume = read_csv(LOAD_DIR / "published_in_volume_clean.csv")
+    editions = read_csv(LOAD_DIR / "editions_clean.csv")
+    events = read_csv(LOAD_DIR / "events_clean.csv")
+    volumes = read_csv(LOAD_DIR / "volumes_clean.csv")
+    journals = read_csv(LOAD_DIR / "journals_clean.csv")
+    belongs_to = read_csv(LOAD_DIR / "belongs_to_clean.csv")
+    is_edition_of = read_csv(LOAD_DIR / "is_edition_of_clean.csv")
 
     paper_ids = papers["paperId:ID(Paper)"].tolist()
     author_ids = authors["authorName:ID(Author)"].tolist()
@@ -117,6 +131,18 @@ def main():
         "artificial intelligence",
     ]
 
+    DB_KEYWORDS = [
+        "data management",
+        "indexing",
+        "data modeling",
+        "big data",
+        "data processing",
+        "data storage",
+        "data querying",
+    ]
+
+    NON_DB_KEYWORDS = [kw for kw in keyword_list if kw not in DB_KEYWORDS]
+
     keywords = pd.DataFrame(keyword_list, columns=["keywordName:ID(Keyword)"])
     print("Keyword nodes:", len(keywords))
 
@@ -150,20 +176,104 @@ def main():
         "artificial intelligence": ["artificial intelligence", "ai", "intelligent"],
     }
 
+    # ----------------------------
+    # Venue mapping
+    # ----------------------------
+
+    edition_to_event = dict(zip(
+        is_edition_of[":START_ID(Edition)"],
+        is_edition_of[":END_ID(Event)"]
+    ))
+
+    volume_to_journal = dict(zip(
+        belongs_to[":START_ID(Volume)"],
+        belongs_to[":END_ID(Journal)"]
+    ))
+
+    paper_to_venue = {}
+
+    for _, row in published_in_edition.iterrows():
+        paper_id = row[":START_ID(Paper)"]
+        edition_id = row[":END_ID(Edition)"]
+        venue = edition_to_event.get(edition_id, "")
+        if venue:
+            paper_to_venue[paper_id] = venue
+
+    for _, row in published_in_volume.iterrows():
+        paper_id = row[":START_ID(Paper)"]
+        volume_id = row[":END_ID(Volume)"]
+        venue = volume_to_journal.get(volume_id, "")
+        if venue:
+            paper_to_venue[paper_id] = venue
+
+    DB_VENUE_HINTS = [
+        "sigmod",
+        "vldb",
+        "pvldb",
+        "icde",
+        "edbt",
+        "pods",
+        "cidr",
+        "ssdbm",
+        "dasfaa",
+        "webdb",
+        "database",
+        "data",
+        "information systems",
+        "world wide web",
+    ]
+
+    def is_db_venue(venue_name: str) -> bool:
+        v = normalize_text(venue_name)
+        return any(hint in v for hint in DB_VENUE_HINTS)
+
     has_keyword_rows = []
 
+    db_venue_papers = 0
+    non_db_venue_papers = 0
+
     for paper in paper_ids:
-        title = title_map.get(paper, "").lower()
+        title = normalize_text(title_map.get(paper, ""))
+        venue = paper_to_venue.get(paper, "")
         assigned = []
 
+        # Rule-based keyword detection from title
         for kw, patterns in keyword_rules.items():
             if any(p in title for p in patterns):
                 assigned.append(kw)
 
-        if not assigned:
-            assigned = random.sample(keyword_list, k=random.randint(1, 2))
+        # Remove duplicates while preserving order
+        assigned = list(dict.fromkeys(assigned))
+
+        if is_db_venue(venue):
+            db_venue_papers += 1
+
+            # Ensure at least one DB keyword in DB-like venues
+            if not any(kw in DB_KEYWORDS for kw in assigned):
+                assigned.append(random.choice(DB_KEYWORDS))
+
+            # Fill to 1..3 keywords, mostly DB
+            target_k = random.randint(1, 3)
+            while len(assigned) < target_k:
+                kw = random.choice(DB_KEYWORDS if random.random() < 0.9 else NON_DB_KEYWORDS)
+                if kw not in assigned:
+                    assigned.append(kw)
+
         else:
-            assigned = assigned[:3]
+            non_db_venue_papers += 1
+
+            if not assigned:
+                # Mostly non-DB for non-DB venues, but keep a little noise
+                pool = NON_DB_KEYWORDS if random.random() < 0.8 else DB_KEYWORDS
+                assigned = random.sample(pool, k=random.randint(1, 2))
+            else:
+                # Keep title-based matches, occasionally add one extra non-DB keyword
+                if len(assigned) < 3 and random.random() < 0.4:
+                    extra = random.choice(NON_DB_KEYWORDS)
+                    if extra not in assigned:
+                        assigned.append(extra)
+
+            assigned = list(dict.fromkeys(assigned))[:3]
 
         for kw in assigned:
             has_keyword_rows.append((paper, kw))
@@ -174,6 +284,8 @@ def main():
     ).drop_duplicates()
 
     print("HAS_KEYWORD edges:", len(has_keyword))
+    print("Papers in DB-like venues:", db_venue_papers)
+    print("Papers in non-DB venues:", non_db_venue_papers)
 
     # ------------------------------------------------
     # 5. CITED

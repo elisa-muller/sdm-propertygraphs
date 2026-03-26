@@ -20,6 +20,9 @@ neo4j/import/*.csv
 neo4j/load_csv/*.csv
 data/raw/
 data/processed/
+*.data
+processed_article
+processed_inproceedings
 
 # DBLP dump
 dblp.dtd
