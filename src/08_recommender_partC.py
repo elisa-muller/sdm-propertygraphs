@@ -4,7 +4,7 @@ from neo4j import GraphDatabase
 # CONNECTION — update password if needed
 # ─────────────────────────────────────────────
 URI  = "neo4j://127.0.0.1:7687"
-AUTH = ("neo4j", "DB180303")
+AUTH = ("neo4j", "your_password")
 
 driver = GraphDatabase.driver(URI, auth=AUTH)
 
